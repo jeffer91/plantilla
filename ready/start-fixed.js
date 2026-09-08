@@ -26,21 +26,31 @@ function run(command, args, options = {}) {
 
 function runNpm(args) {
   const npmExecPath = process.env.npm_execpath;
+  const installEnv = {
+    ...process.env,
+    ELECTRON_MIRROR: process.env.ELECTRON_MIRROR || 'https://npmmirror.com/mirrors/electron/',
+    FFMPEG_BINARIES_URL: process.env.FFMPEG_BINARIES_URL || 'https://cdn.npmmirror.com/binaries/ffmpeg-static',
+    FFPROBE_BINARIES_URL: process.env.FFPROBE_BINARIES_URL || 'https://cdn.npmmirror.com/binaries/ffprobe-static',
+    npm_config_fetch_retries: process.env.npm_config_fetch_retries || '5',
+    npm_config_fetch_retry_mintimeout: process.env.npm_config_fetch_retry_mintimeout || '20000',
+    npm_config_fetch_retry_maxtimeout: process.env.npm_config_fetch_retry_maxtimeout || '120000',
+    npm_config_fetch_timeout: process.env.npm_config_fetch_timeout || '120000'
+  };
 
   if (npmExecPath && fs.existsSync(npmExecPath)) {
-    return run(process.execPath, [npmExecPath, ...args]);
+    return run(process.execPath, [npmExecPath, ...args], { env: installEnv });
   }
 
   if (isWindows) {
     const comspec = process.env.ComSpec || process.env.COMSPEC || 'cmd.exe';
     const quoted = args.map((x) => /[\s&|<>^]/.test(x) ? `"${x.replace(/"/g, '\\"')}"` : x).join(' ');
-    return run(comspec, ['/d', '/s', '/c', `npm ${quoted}`]);
+    return run(comspec, ['/d', '/s', '/c', `npm ${quoted}`], { env: installEnv });
   }
 
-  return run('npm', args);
+  return run('npm', args, { env: installEnv });
 }
 
-function moduleExists(name) {
+function existsPackage(name) {
   try {
     require.resolve(name, { paths: [root] });
     return true;
@@ -49,25 +59,68 @@ function moduleExists(name) {
   }
 }
 
+function electronReady() {
+  try {
+    const p = require('electron');
+    return typeof p === 'string' && fs.existsSync(p);
+  } catch (_) {
+    return false;
+  }
+}
+
+function ffmpegReady() {
+  try {
+    const p = require('ffmpeg-static');
+    return typeof p === 'string' && fs.existsSync(p);
+  } catch (_) {
+    return false;
+  }
+}
+
+function ffprobeReady() {
+  try {
+    const p = require('ffprobe-static').path;
+    return typeof p === 'string' && fs.existsSync(p);
+  } catch (_) {
+    return false;
+  }
+}
+
+function removeBrokenInstallTargets() {
+  const targets = [
+    path.join(root, 'node_modules', 'electron'),
+    path.join(root, 'node_modules', 'ffmpeg-static'),
+    path.join(root, 'node_modules', 'ffprobe-static')
+  ];
+
+  for (const target of targets) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+    } catch (_) {
+      // npm puede reparar encima; no abortamos por un bloqueo temporal de antivirus/índice.
+    }
+  }
+}
+
 const major = Number(process.versions.node.split('.')[0]);
 if (!Number.isFinite(major) || major < 18) {
   fail(`Se requiere Node.js 18 o superior. Tienes ${process.versions.node}.`);
 }
 
-const required = ['electron', 'ffmpeg-static', 'ffprobe-static'];
-const missing = required.filter((name) => !moduleExists(name));
 let installedNow = false;
+const readyBefore = electronReady() && ffmpegReady() && ffprobeReady();
 
-if (missing.length) {
-  console.log('\n[YouTube Studio IA] Primera ejecución: instalando dependencias...');
-  console.log(`[YouTube Studio IA] Faltan: ${missing.join(', ')}\n`);
+if (!readyBefore) {
+  console.log('\n[YouTube Studio IA] Primera ejecución o instalación incompleta: preparando dependencias...');
+  console.log('[YouTube Studio IA] Se usarán mirrors para Electron, FFmpeg y FFprobe para evitar bloqueos de GitHub.\n');
+  removeBrokenInstallTargets();
   runNpm(['install', '--no-audit', '--no-fund']);
   installedNow = true;
 }
 
-for (const name of required) {
-  if (!moduleExists(name)) fail(`La dependencia ${name} no quedó instalada correctamente.`);
-}
+if (!existsPackage('electron') || !electronReady()) fail('Electron no quedó instalado correctamente.');
+if (!existsPackage('ffmpeg-static') || !ffmpegReady()) fail('FFmpeg no quedó instalado correctamente.');
+if (!existsPackage('ffprobe-static') || !ffprobeReady()) fail('FFprobe no quedó instalado correctamente.');
 
 let ffmpeg;
 let ffprobe;
@@ -75,10 +128,6 @@ let electronExe;
 try { ffmpeg = require('ffmpeg-static'); } catch (e) { fail('No se pudo cargar FFmpeg.', e.message); }
 try { ffprobe = require('ffprobe-static').path; } catch (e) { fail('No se pudo cargar FFprobe.', e.message); }
 try { electronExe = require('electron'); } catch (e) { fail('No se pudo cargar Electron.', e.message); }
-
-if (!ffmpeg || !fs.existsSync(ffmpeg)) fail('FFmpeg no existe en la ruta instalada.', String(ffmpeg || ''));
-if (!ffprobe || !fs.existsSync(ffprobe)) fail('FFprobe no existe en la ruta instalada.', String(ffprobe || ''));
-if (!electronExe || !fs.existsSync(electronExe)) fail('Electron no existe en la ruta instalada.', String(electronExe || ''));
 
 const ffmpegCheck = spawnSync(ffmpeg, ['-version'], { windowsHide: true, encoding: 'utf8' });
 if (ffmpegCheck.error || ffmpegCheck.status !== 0) {
